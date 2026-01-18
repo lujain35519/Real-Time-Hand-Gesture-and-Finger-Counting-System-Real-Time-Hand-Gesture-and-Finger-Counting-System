@@ -1,0 +1,162 @@
+# -*- coding: utf-8 -*-
+
+import numpy as np
+import cv2
+import time
+import math
+def count_fingers(hand_mask, output_frame=None):
+    # Find contours in the binary hand mask
+    contour_info = cv2.findContours(hand_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = contour_info[0] if len(contour_info) == 2 else contour_info[1]
+
+    if not contours:
+        return 0, output_frame
+
+    # Find the largest contour assuming it's the hand
+    hand_contour = max(contours, key=cv2.contourArea)
+
+    # Convex hull
+    hull = cv2.convexHull(hand_contour, returnPoints=False)
+    if hull is None or len(hull) < 3:
+        return 0, output_frame
+
+    # Convexity defects
+    defects = cv2.convexityDefects(hand_contour, hull)
+    if defects is None:
+        return 0, output_frame
+
+    finger_count = 0
+
+    for i in range(defects.shape[0]):
+        s, e, f, d = defects[i, 0]
+        start = tuple(hand_contour[s][0])
+        end = tuple(hand_contour[e][0])
+        far = tuple(hand_contour[f][0])
+
+        # Compute lengths of triangle sides
+        a = np.linalg.norm(np.array(start) - np.array(end))
+        b = np.linalg.norm(np.array(start) - np.array(far))
+        c = np.linalg.norm(np.array(end) - np.array(far))
+
+        # Compute angle using cosine rule
+        if b * c == 0:
+            continue
+        angle = math.acos((b**2 + c**2 - a**2) / (2 * b * c)) * (180 / np.pi)
+
+        # Heuristic: angle < 90° and depth > threshold
+        if angle < 90 and d > 10000:
+            finger_count += 1
+            if output_frame is not None:
+                cv2.circle(output_frame, far, 5, (0, 255, 0), -1)
+
+    # Draw results
+    if output_frame is not None:
+        cv2.drawContours(output_frame, [hand_contour], -1, (255, 255, 0), 2)
+        cv2.putText(output_frame, f"Fingers: {finger_count+1}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+
+    return finger_count+1, output_frame
+
+
+def detect_skin(frame,hsv):
+        
+    # Define skin color range in HSV
+    lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+    upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+        
+        # Create skin mask
+    mask = cv2.inRange(hsv, lower_skin, upper_skin)
+        
+        # Apply mask to original image
+    skin = cv2.bitwise_and(frame, frame, mask=mask)
+        
+    return mask
+
+def advanced_noise_processing(mask):
+    blurred = cv2.GaussianBlur(mask, (5,5),1)
+    
+    # 2. Morphological closing (fill small holes)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7))
+    closed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
+    
+    # 3. Morphological opening (remove small noise)
+    mask = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=2)
+    cv2.imshow('Skin Mask', mask)
+    # 2. Adaptive thresholding
+    thresh = cv2.adaptiveThreshold(mask, 255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    # 3. Morphological gradient (find edges)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+    gradient = cv2.morphologyEx(thresh, cv2.MORPH_GRADIENT, kernel)
+    # 4. Area-based noise removal
+    contours, hierarchy = cv2.findContours(gradient, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2:]
+    filtered_mask = np.zeros_like(mask)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > 500:  # Only keep large enough regions
+            cv2.drawContours(filtered_mask, [cnt], -1, 255, -1)
+    return filtered_mask
+
+def capture_and_display():
+    # Initialize camera
+    cap = cv2.VideoCapture(0)
+    
+    # Check if camera opened successfully
+    if not cap.isOpened():
+        print("Error: Could not open camera!")
+        return
+        
+        # Set optimal resolution for hand recognition
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 160)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 120)
+    
+    # Allow camera to warm up (important for consistent lighting)
+    print("Camera warming up...")
+    time.sleep(2)
+    
+    print("Press SPACE to capture, ESC to exit")
+    frame_counter = 0
+    display_every_n = 10
+    
+    while True:
+        # Capture frame
+        ret, frame = cap.read()
+
+    
+
+    
+        if not ret:
+            print("Error: Could not capture frame!")
+            break
+        
+        frame = cv2.flip(frame, 1)
+        frame_counter += 1
+        hsv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)        
+        if ret and frame_counter % display_every_n == 0:
+            # Only process and display every nth frame
+            cv2.imshow('Decimated Feed', frame)
+            
+            #skin det
+            mask=detect_skin(frame,hsv_image)
+            cv2.imshow('noiseless', mask)
+                #noise cancel
+            hand=advanced_noise_processing(mask)
+            from collections import deque
+            finger_history = deque(maxlen=5)
+            for i in range(5):
+              finger_count, processed_frame = count_fingers(hand, frame.copy())
+              finger_history.append(finger_count)
+              smoothed_count = round(sum(finger_history) / len(finger_history))
+            cv2.imshow('Finger Detection', processed_frame)
+            print(f"Detected fingers: {smoothed_count}")
+
+        key = cv2.waitKey(1)
+        # Exit when ESC is pressed
+        if key == 27:  # ASCII for ESC
+            break
+    
+    # Release resources
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    capture_and_display()
